@@ -41,11 +41,30 @@ contract HotelBooking {
     // events get saved in the transaction logs so we can see what happened
     event RoomAdded(uint256 indexed roomId, uint256 pricePerNight);
     event RoomBooked(uint256 indexed bookingId, address indexed guest, uint256 roomId, uint256 amount, bytes32 bookingRef);
+    event CheckedIn(uint256 indexed bookingId, address indexed guest);
+    event PaymentReleased(address indexed to, uint256 amount);
+
+    bool private locked; // used by nonReentrant below
 
     // only the hotel wallet can call functions that use this
     modifier onlyHotel() {
         require(msg.sender == hotel, "Only the hotel can do this");
         _;
+    }
+
+    // only the guest who made this booking can call functions that use this
+    modifier onlyGuest(uint256 bookingId) {
+        require(msg.sender == bookings[bookingId].guest, "Only the guest of this booking can do this");
+        _;
+    }
+
+    // stops someone calling back into a function while it is still sending money
+    // (re-entrancy attack)
+    modifier nonReentrant() {
+        require(!locked, "Busy");
+        locked = true;
+        _;
+        locked = false;
     }
 
     // hotel adds a new room with its price per night
@@ -99,6 +118,34 @@ contract HotelBooking {
 
         emit RoomBooked(bookingCount, msg.sender, roomId, msg.value, ref);
         return bookingCount;
+    }
+
+    // guest confirms they have arrived at the hotel
+    // the contract then releases the money to the hotel
+    function confirmCheckIn(uint256 bookingId) external onlyGuest(bookingId) nonReentrant {
+        Booking storage b = bookings[bookingId];
+        require(b.status == Status.Booked, "Booking is not active");
+
+        // update the booking first, then send the money
+        // (checks-effects-interactions, so nobody can get paid twice)
+        b.status = Status.CheckedIn;
+        uint256 amount = b.amountPaid;
+        b.amountPaid = 0;
+
+        _pay(hotel, amount);
+        emit CheckedIn(bookingId, msg.sender);
+    }
+
+    // shows how much money the contract is holding right now
+    function escrowBalance() external view returns (uint256) {
+        return address(this).balance;
+    }
+
+    // helper that sends money and makes sure it actually went through
+    function _pay(address to, uint256 amount) private {
+        (bool ok, ) = payable(to).call{value: amount}("");
+        require(ok, "Payment failed");
+        emit PaymentReleased(to, amount);
     }
 
     // runs once when the contract is deployed
