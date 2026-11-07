@@ -43,6 +43,8 @@ contract HotelBooking {
     event RoomBooked(uint256 indexed bookingId, address indexed guest, uint256 roomId, uint256 amount, bytes32 bookingRef);
     event CheckedIn(uint256 indexed bookingId, address indexed guest);
     event PaymentReleased(address indexed to, uint256 amount);
+    event BookingCancelled(uint256 indexed bookingId, uint256 refundToGuest, uint256 paidToHotel);
+    event NoShowClaimed(uint256 indexed bookingId, uint256 paidToHotel);
 
     bool private locked; // used by nonReentrant below
 
@@ -134,6 +136,58 @@ contract HotelBooking {
 
         _pay(hotel, amount);
         emit CheckedIn(bookingId, msg.sender);
+    }
+
+    // guest cancels before check-in
+    // 24h or more before = full refund, less than 24h = 50% back and 50% to the hotel
+    function cancelBooking(uint256 bookingId) external onlyGuest(bookingId) nonReentrant {
+        Booking storage b = bookings[bookingId];
+        require(b.status == Status.Booked, "Booking is not active");
+        require(block.timestamp < b.checkInTime, "Check-in time has passed");
+
+        b.status = Status.Cancelled;
+        uint256 amount = b.amountPaid;
+        b.amountPaid = 0;
+
+        // free up the nights so someone else can book them
+        uint256 firstDay = b.checkInTime / 1 days;
+        for (uint256 d = 0; d < b.nights; d++) {
+            dayTaken[b.roomId][firstDay + d] = false;
+        }
+
+        // work out the refund
+        uint256 refund;
+        if (block.timestamp + CANCEL_WINDOW <= b.checkInTime) {
+            refund = amount;        // cancelled early, full refund
+        } else {
+            refund = amount / 2;    // cancelled late, half back
+        }
+        uint256 toHotel = amount - refund;
+
+        _pay(b.guest, refund);
+        if (toHotel > 0) {
+            _pay(hotel, toHotel);
+        }
+        emit BookingCancelled(bookingId, refund, toHotel);
+    }
+
+    // guest never turned up, so once the stay is over the hotel can take the payment
+    function claimNoShow(uint256 bookingId) external onlyHotel nonReentrant {
+        Booking storage b = bookings[bookingId];
+        require(b.status == Status.Booked, "Booking is not active");
+        require(block.timestamp >= b.checkInTime + b.nights * 1 days, "Stay has not ended yet");
+
+        b.status = Status.NoShow;
+        uint256 amount = b.amountPaid;
+        b.amountPaid = 0;
+
+        _pay(hotel, amount);
+        emit NoShowClaimed(bookingId, amount);
+    }
+
+    // returns all the details of one booking in one go (handy for testing in Remix)
+    function getBooking(uint256 bookingId) external view returns (Booking memory) {
+        return bookings[bookingId];
     }
 
     // shows how much money the contract is holding right now
